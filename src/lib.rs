@@ -5,21 +5,52 @@
 extern crate backtrace;
 
 use backtrace::Backtrace;
-use std::cell::{Cell, RefCell as StdRefCell, Ref as StdRef, RefMut as StdRefMut};
+use std::cell::{
+    BorrowError, BorrowMutError, Ref as StdRef, RefCell as StdRefCell, RefMut as StdRefMut,
+};
 use std::env;
-use std::fmt::{Display, Debug, Formatter, Error};
+use std::fmt::{Debug, Display, Error, Formatter};
 use std::ops::{Deref, DerefMut};
 
 /// A RefCell that tracks outstanding borrows and reports stack traces for dynamic borrow failures.
+#[derive(Debug)]
 pub struct RefCell<T: ?Sized> {
-    borrows: StdRefCell<Vec<BorrowRecord>>,
-    next_id: Cell<usize>,
+    borrows: StdRefCell<BorrowData>,
     inner: StdRefCell<T>,
 }
 
+#[derive(Debug)]
+struct BorrowData {
+    next_id: usize,
+    borrows: Vec<BorrowRecord>,
+}
+
+#[derive(Debug)]
 struct BorrowRecord {
     id: usize,
     backtrace: Backtrace,
+}
+
+impl BorrowData {
+    fn record(&mut self) -> usize {
+        let id = self.next_id();
+        self.borrows.push(BorrowRecord {
+            id: id,
+            backtrace: Backtrace::new(),
+        });
+        id
+    }
+
+    fn next_id(&mut self) -> usize {
+        let id = self.next_id;
+        self.next_id = id.wrapping_add(1);
+        id
+    }
+
+    fn remove_matching_record(&mut self, id: usize) {
+        let idx = self.borrows.iter().position(|record| record.id == id);
+        self.borrows.remove(idx.expect("missing borrow record"));
+    }
 }
 
 impl<T> RefCell<T> {
@@ -27,8 +58,10 @@ impl<T> RefCell<T> {
     pub fn new(value: T) -> RefCell<T> {
         RefCell {
             inner: StdRefCell::new(value),
-            borrows: StdRefCell::new(vec![]),
-            next_id: Cell::new(0),
+            borrows: StdRefCell::new(BorrowData {
+                borrows: vec![],
+                next_id: 0,
+            }),
         }
     }
 
@@ -41,19 +74,30 @@ impl<T> RefCell<T> {
 /// An immutable reference to the value stored in a RefCell.
 pub struct Ref<'a, T: ?Sized + 'a> {
     inner: StdRef<'a, T>,
-    cell: &'a RefCell<T>,
-    id: usize,
+    data: RefBorrowData<'a>,
 }
 
 impl<'a, T: ?Sized> Ref<'a, T> {
     /// Clone the provided Ref value. This is treated as a separate borrow record from
     /// the original cloned reference.
     pub fn clone(orig: &Ref<'a, T>) -> Ref<'a, T> {
-        let id = orig.cell.record();
+        let id = orig.data.cell.borrow_mut().record();
         Ref {
             inner: StdRef::clone(&orig.inner),
-            cell: orig.cell,
-            id: id,
+            data: RefBorrowData {
+                cell: orig.data.cell,
+                id: id,
+            },
+        }
+    }
+
+    pub fn map<U: ?Sized, F>(orig: Ref<'a, T>, f: F) -> Ref<'a, U>
+    where
+        F: FnOnce(&T) -> &U,
+    {
+        Ref {
+            inner: StdRef::map(StdRef::clone(&orig.inner), f),
+            data: orig.data,
         }
     }
 }
@@ -78,17 +122,34 @@ impl<'a, T: ?Sized> Deref for Ref<'a, T> {
     }
 }
 
-impl<'a, T: ?Sized> Drop for Ref<'a, T> {
-    fn drop(&mut self) {
-        self.cell.remove_matching_record(self.id);
-    }
-}
-
 /// A mutable reference to the value stored in the associated RefCell.
 pub struct RefMut<'a, T: ?Sized + 'a> {
     inner: StdRefMut<'a, T>,
-    cell: &'a RefCell<T>,
+    data: RefBorrowData<'a>,
+}
+
+struct RefBorrowData<'a> {
+    cell: &'a StdRefCell<BorrowData>,
     id: usize,
+}
+
+impl<'a> Drop for RefBorrowData<'a> {
+    fn drop(&mut self) {
+        self.cell.borrow_mut().remove_matching_record(self.id);
+    }
+}
+
+impl<'a, T: ?Sized> RefMut<'a, T> {
+    pub fn map<U: ?Sized, F>(orig: RefMut<'a, T>, f: F) -> RefMut<'a, U>
+    where
+        F: FnOnce(&mut T) -> &mut U,
+    {
+        let RefMut { inner, data } = orig;
+        RefMut {
+            inner: StdRefMut::map(inner, f),
+            data,
+        }
+    }
 }
 
 impl<'a, T: ?Sized> Deref for RefMut<'a, T> {
@@ -105,71 +166,60 @@ impl<'a, T: ?Sized> DerefMut for RefMut<'a, T> {
     }
 }
 
-
-impl<'a, T: ?Sized> Drop for RefMut<'a, T> {
-    fn drop(&mut self) {
-        self.cell.remove_matching_record(self.id);
-    }
-}
-
 impl<T: ?Sized> RefCell<T> {
-    fn remove_matching_record(&self, id: usize) {
-        let idx = self.borrows.borrow().iter().position(|record| record.id == id);
-        self.borrows.borrow_mut().remove(idx.expect("missing borrow record"));
-    }
-    
-    #[inline(always)]
-    fn record(&self) -> usize {
-        let id = self.next_id();
-        self.borrows.borrow_mut().push(BorrowRecord {
-            id: id,
-            backtrace: Backtrace::new(),
-        });
-        id
-    }
-
-    fn next_id(&self) -> usize {
-        let id = self.next_id.get();
-        self.next_id.set(id.wrapping_add(1));
-        id
-    }
-
     /// Borrow the value stored in this cell immutably. Panics if any outstanding mutable
     /// borrows of the same cell exist.
-    pub fn borrow(&self) -> Ref<T> {
+    pub fn borrow(&self) -> Ref<'_, T> {
         if let Ok(r) = self.inner.try_borrow() {
-            let id = self.record();
+            let id = self.borrows.borrow_mut().record();
             Ref {
                 inner: r,
-                cell: self,
-                id: id,
+                data: RefBorrowData {
+                    cell: &self.borrows,
+                    id: id,
+                },
             }
         } else {
             if let Ok(var) = env::var("RUST_BACKTRACE") {
                 if !var.is_empty() {
                     eprintln!("Outstanding borrow:");
-                    print_filtered_backtrace(&self.borrows.borrow()[0].backtrace);
+                    print_filtered_backtrace(&self.borrows.borrow().borrows[0].backtrace);
                 }
             }
             panic!("RefCell is already mutably borrowed.");
         }
     }
 
+    pub fn try_borrow(&self) -> Result<Ref<T>, BorrowError> {
+        self.inner.try_borrow().map(|r| {
+            let id = self.borrows.borrow_mut().record();
+            Ref {
+                inner: r,
+                data: RefBorrowData {
+                    cell: &self.borrows,
+                    id: id,
+                },
+            }
+        })
+    }
+
     /// Borrow the value stored in this cell mutably. Panics if any outstanding immutable
     /// borrows of the same cell exist.
     pub fn borrow_mut(&self) -> RefMut<T> {
         if let Ok(r) = self.inner.try_borrow_mut() {
-            let id = self.record();
+            let id = self.borrows.borrow_mut().record();
             RefMut {
                 inner: r,
-                cell: self,
-                id: id,
+                data: RefBorrowData {
+                    cell: &self.borrows,
+                    id: id,
+                },
             }
         } else {
             if let Ok(var) = env::var("RUST_BACKTRACE") {
                 if !var.is_empty() {
                     eprintln!("Outstanding borrows:");
-                    for borrow in &*self.borrows.borrow() {
+                    for borrow in &*self.borrows.borrow().borrows {
                         print_filtered_backtrace(&borrow.backtrace);
                         eprintln!("");
                     }
@@ -177,6 +227,27 @@ impl<T: ?Sized> RefCell<T> {
             }
             panic!("RefCell is already immutably borrowed.");
         }
+    }
+
+    pub fn try_borrow_mut(&self) -> Result<RefMut<'_, T>, BorrowMutError> {
+        self.inner.try_borrow_mut().map(|r| {
+            let id = self.borrows.borrow_mut().record();
+            RefMut {
+                inner: r,
+                data: RefBorrowData {
+                    cell: &self.borrows,
+                    id: id,
+                },
+            }
+        })
+    }
+
+    pub fn as_ptr(&self) -> *mut T {
+        self.inner.as_ptr()
+    }
+
+    pub unsafe fn try_borrow_unguarded(&self) -> Result<&T, BorrowError> {
+        self.inner.try_borrow_unguarded()
     }
 }
 
@@ -207,9 +278,45 @@ fn print_filtered_backtrace(backtrace: &Backtrace) {
     }
 }
 
+impl<T: Clone> Clone for RefCell<T> {
+    fn clone(&self) -> RefCell<T> {
+        RefCell::new(self.borrow().clone())
+    }
+}
+
+impl<T: Default> Default for RefCell<T> {
+    fn default() -> RefCell<T> {
+        RefCell::new(Default::default())
+    }
+}
+
+impl<T: ?Sized + PartialEq> PartialEq for RefCell<T> {
+    fn eq(&self, other: &RefCell<T>) -> bool {
+        *self.borrow() == *other.borrow()
+    }
+}
+
+pub fn ref_filter_map<T: ?Sized, U: ?Sized, F: FnOnce(&T) -> Option<&U>>(
+    orig: Ref<T>,
+    f: F,
+) -> Option<Ref<U>> {
+    f(&orig)
+        .map(|new| new as *const U)
+        .map(|raw| Ref::map(orig, |_| unsafe { &*raw }))
+}
+
+pub fn ref_mut_filter_map<T: ?Sized, U: ?Sized, F: FnOnce(&mut T) -> Option<&mut U>>(
+    mut orig: RefMut<T>,
+    f: F,
+) -> Option<RefMut<U>> {
+    f(&mut orig)
+        .map(|new| new as *mut U)
+        .map(|raw| RefMut::map(orig, |_| unsafe { &mut *raw }))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{RefCell, Ref};
+    use super::{Ref, RefCell};
 
     #[test]
     #[should_panic(expected = "RefCell is already immutably borrowed")]
