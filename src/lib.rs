@@ -355,6 +355,14 @@ mod tests {
         let _b2 = c.borrow();
     }
 
+    #[test]
+    #[should_panic(expected = "RefCell is already borrowed")]
+    fn cannot_double_borrow_mut() {
+        let c = RefCell::new(5);
+        let _b = c.borrow_mut();
+        let _b2 = c.borrow_mut();
+    }
+
     #[inline(never)]
     fn borrow_immutably<T>(cell: &RefCell<T>) -> Ref<T> {
         cell.borrow()
@@ -446,14 +454,6 @@ mod tests {
     fn cannot_replace_with_mut_borrowed_refcell() {
         let c = RefCell::new(5);
         let _b = c.borrow_mut();
-        c.replace_with(|&mut old_val| { old_val + 1 });
-    }
-
-    #[test]
-    #[should_panic(expected = "RefCell is already borrowed")]
-    fn test() {
-        let c = RefCell::new(5);
-        let _b = c.borrow_mut();
-        let _b2 = c.borrow_mut();
+        c.replace_with(|&mut old_val| old_val + 1);
     }
 }
