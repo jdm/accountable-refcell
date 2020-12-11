@@ -8,9 +8,9 @@ use backtrace::Backtrace;
 use std::cell::{
     BorrowError, BorrowMutError, Ref as StdRef, RefCell as StdRefCell, RefMut as StdRefMut,
 };
-use std::{env, mem};
 use std::fmt::{Debug, Display, Error, Formatter};
 use std::ops::{Deref, DerefMut};
+use std::{env, mem};
 
 /// A RefCell that tracks outstanding borrows and reports stack traces for dynamic borrow failures.
 #[derive(Debug)]
@@ -251,7 +251,7 @@ impl<T: ?Sized> RefCell<T> {
     }
 }
 
-impl <T> RefCell<T> {
+impl<T> RefCell<T> {
     /// Corresponds to https://doc.rust-lang.org/std/cell/struct.RefCell.html#method.replace.
     pub fn replace(&self, t: T) -> T {
         mem::replace(&mut *self.borrow_mut(), t)
@@ -298,7 +298,7 @@ impl<T: Clone> Clone for RefCell<T> {
     }
 }
 
-impl <T: Default> RefCell<T> {
+impl<T: Default> RefCell<T> {
     /// Corresponds to https://doc.rust-lang.org/std/cell/struct.RefCell.html#method.take.
     pub fn take(&self) -> T {
         self.replace(Default::default())
@@ -394,7 +394,7 @@ mod tests {
         assert_eq!(5, c.take());
         assert_eq!(i32::default(), *c.borrow());
     }
-    
+
     #[test]
     #[should_panic(expected = "RefCell is already borrowed")]
     fn cannot_take_borrowed_refcell() {
@@ -446,7 +446,7 @@ mod tests {
     fn cannot_replace_with_borrowed_refcell() {
         let c = RefCell::new(5);
         let _b = c.borrow();
-        c.replace_with(|&mut old_val| { old_val + 1 });
+        c.replace_with(|&mut old_val| old_val + 1);
     }
 
     #[test]
