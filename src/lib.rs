@@ -8,7 +8,7 @@ use backtrace::Backtrace;
 use std::cell::{
     BorrowError, BorrowMutError, Ref as StdRef, RefCell as StdRefCell, RefMut as StdRefMut,
 };
-use std::env;
+use std::{env, mem};
 use std::fmt::{Debug, Display, Error, Formatter};
 use std::ops::{Deref, DerefMut};
 
@@ -203,8 +203,8 @@ impl<T: ?Sized> RefCell<T> {
         })
     }
 
-    /// Borrow the value stored in this cell mutably. Panics if any outstanding immutable
-    /// borrows of the same cell exist.
+    /// Borrow the value stored in this cell mutably. Panics if there are any other outstanding
+    /// borrows of this cell (mutable borrows are unique, i.e. there can only be one).
     pub fn borrow_mut(&self) -> RefMut<T> {
         if let Ok(r) = self.inner.try_borrow_mut() {
             let id = self.borrows.borrow_mut().record();
@@ -225,7 +225,7 @@ impl<T: ?Sized> RefCell<T> {
                     }
                 }
             }
-            panic!("RefCell is already immutably borrowed.");
+            panic!("RefCell is already borrowed.");
         }
     }
 
@@ -248,6 +248,20 @@ impl<T: ?Sized> RefCell<T> {
 
     pub unsafe fn try_borrow_unguarded(&self) -> Result<&T, BorrowError> {
         self.inner.try_borrow_unguarded()
+    }
+}
+
+impl <T> RefCell<T> {
+    /// Corresponds to https://doc.rust-lang.org/std/cell/struct.RefCell.html#method.replace.
+    pub fn replace(&self, t: T) -> T {
+        mem::replace(&mut *self.borrow_mut(), t)
+    }
+
+    /// Corresponds to https://doc.rust-lang.org/std/cell/struct.RefCell.html#method.replace_with.
+    pub fn replace_with<F: FnOnce(&mut T) -> T>(&self, f: F) -> T {
+        let mut_borrow = &mut *self.borrow_mut();
+        let replacement = f(mut_borrow);
+        mem::replace(mut_borrow, replacement)
     }
 }
 
@@ -281,6 +295,13 @@ fn print_filtered_backtrace(backtrace: &Backtrace) {
 impl<T: Clone> Clone for RefCell<T> {
     fn clone(&self) -> RefCell<T> {
         RefCell::new(self.borrow().clone())
+    }
+}
+
+impl <T: Default> RefCell<T> {
+    /// Corresponds to https://doc.rust-lang.org/std/cell/struct.RefCell.html#method.take.
+    pub fn take(&self) -> T {
+        self.replace(Default::default())
     }
 }
 
@@ -319,7 +340,7 @@ mod tests {
     use super::{Ref, RefCell};
 
     #[test]
-    #[should_panic(expected = "RefCell is already immutably borrowed")]
+    #[should_panic(expected = "RefCell is already borrowed")]
     fn cannot_borrow_mutably() {
         let c = RefCell::new(5);
         let _b = c.borrow();
@@ -356,6 +377,83 @@ mod tests {
             let _b = borrow_immutably(&c);
             Ref::clone(&_b)
         };
+        let _b2 = c.borrow_mut();
+    }
+
+    #[test]
+    fn take_refcell_returns_correct_value() {
+        let c: RefCell<i32> = RefCell::new(5);
+        assert_eq!(5, c.take());
+        assert_eq!(i32::default(), *c.borrow());
+    }
+    
+    #[test]
+    #[should_panic(expected = "RefCell is already borrowed")]
+    fn cannot_take_borrowed_refcell() {
+        let c = RefCell::new(5);
+        let _b = c.borrow();
+        c.take();
+    }
+
+    #[test]
+    #[should_panic(expected = "RefCell is already borrowed")]
+    fn cannot_take_mut_borrowed_refcell() {
+        let c = RefCell::new(5);
+        let _b = c.borrow_mut();
+        c.take();
+    }
+
+    #[test]
+    fn replace_refcell_properly_replaces_contents() {
+        let c = RefCell::new(5);
+        c.replace(12);
+        assert_eq!(12, *c.borrow());
+    }
+
+    #[test]
+    #[should_panic(expected = "RefCell is already borrowed")]
+    fn cannot_replace_borrowed_refcell() {
+        let c = RefCell::new(5);
+        let _b = c.borrow();
+        c.replace(12);
+    }
+
+    #[test]
+    #[should_panic(expected = "RefCell is already borrowed")]
+    fn cannot_replace_mut_borrowed_refcell() {
+        let c = RefCell::new(5);
+        let _b = c.borrow_mut();
+        c.replace(12);
+    }
+
+    #[test]
+    fn replace_with_refcell_properly_replaces_contents() {
+        let c = RefCell::new(5);
+        c.replace_with(|&mut old_value| old_value + 1);
+        assert_eq!(6, *c.borrow());
+    }
+
+    #[test]
+    #[should_panic(expected = "RefCell is already borrowed")]
+    fn cannot_replace_with_borrowed_refcell() {
+        let c = RefCell::new(5);
+        let _b = c.borrow();
+        c.replace_with(|&mut old_val| { old_val + 1 });
+    }
+
+    #[test]
+    #[should_panic(expected = "RefCell is already borrowed")]
+    fn cannot_replace_with_mut_borrowed_refcell() {
+        let c = RefCell::new(5);
+        let _b = c.borrow_mut();
+        c.replace_with(|&mut old_val| { old_val + 1 });
+    }
+
+    #[test]
+    #[should_panic(expected = "RefCell is already borrowed")]
+    fn test() {
+        let c = RefCell::new(5);
+        let _b = c.borrow_mut();
         let _b2 = c.borrow_mut();
     }
 }
