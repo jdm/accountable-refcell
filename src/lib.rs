@@ -100,6 +100,16 @@ impl<'a, T: ?Sized> Ref<'a, T> {
             data: orig.data,
         }
     }
+
+    pub fn filter_map<U: ?Sized, F>(orig: Ref<'a, T>, f: F) -> Result<Ref<'a, U>, Self>
+    where
+        F: FnOnce(&T) -> Option<&U>,
+    {
+        match f(&orig).map(|new| new as *const U) {
+            Some(raw) => Ok(Ref::map(orig, |_| unsafe { &*raw })),
+            None => Err(orig),
+        }
+    }
 }
 
 impl<'a, T: ?Sized + Display> Display for Ref<'a, T> {
@@ -148,6 +158,16 @@ impl<'a, T: ?Sized> RefMut<'a, T> {
         RefMut {
             inner: StdRefMut::map(inner, f),
             data,
+        }
+    }
+
+    pub fn filter_map<U: ?Sized, F>(mut orig: RefMut<'a, T>, f: F) -> Result<RefMut<'a, U>, Self>
+    where
+        F: FnOnce(&mut T) -> Option<&mut U>,
+    {
+        match f(&mut orig).map(|new| new as *mut U) {
+            Some(raw) => Ok(RefMut::map(orig, |_| unsafe { &mut *raw })),
+            None => Err(orig),
         }
     }
 }
@@ -317,6 +337,7 @@ impl<T: ?Sized + PartialEq> PartialEq for RefCell<T> {
     }
 }
 
+#[deprecated(since = "0.2.2", note = "Users should instead use Ref::filter_map")]
 pub fn ref_filter_map<T: ?Sized, U: ?Sized, F: FnOnce(&T) -> Option<&U>>(
     orig: Ref<T>,
     f: F,
@@ -326,6 +347,7 @@ pub fn ref_filter_map<T: ?Sized, U: ?Sized, F: FnOnce(&T) -> Option<&U>>(
         .map(|raw| Ref::map(orig, |_| unsafe { &*raw }))
 }
 
+#[deprecated(since = "0.2.2", note = "Users should instead use RefMut::filter_map")]
 pub fn ref_mut_filter_map<T: ?Sized, U: ?Sized, F: FnOnce(&mut T) -> Option<&mut U>>(
     mut orig: RefMut<T>,
     f: F,
